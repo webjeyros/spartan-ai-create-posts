@@ -43,13 +43,14 @@ class OpenAIService
             }
         }
 
-        $systemPrompt = $this->buildSEOAnalysisPrompt($params);
+        $prompts = $this->getPrompts($params['language']);
+        $systemPrompt = $this->buildSEOAnalysisPrompt($params, $prompts);
         
         $requestData = [
             'model' => $params['model'] ?? config('article-generator.openai.default_model'),
             'messages' => [
                 ['role' => 'system', 'content' => $systemPrompt],
-                ['role' => 'user', 'content' => "Проанализируй запрос: {$params['query']}"]
+                ['role' => 'user', 'content' => $prompts['seo_user_prefix'] . ": {$params['query']}"]
             ],
             'temperature' => 0.7,
             'max_tokens' => 4000
@@ -80,20 +81,16 @@ class OpenAIService
 
     public function generateArticlePrompt(array $seoAnalysis, array $params): array
     {
-        $systemPrompt = "Ты эксперт по созданию промптов для написания SEO-статей. " .
-            "На основе детального SEO-анализа создай исчерпывающий промпт на {$params['language']} " .
-            "для генерации статьи объемом {$params['word_count']} слов.\n\n" .
-            "Промпт должен включать:\n" .
-            "- Роль для копирайтера\n" .
-            "- Цель статьи\n" .
-            "- Целевую аудиторию\n" .
-            "- Тон и стиль\n" .
-            "- Детальную структуру (H1-H3)\n" .
-            "- Ключевые слова для использования\n" .
-            "- Особые инструкции";
+        $prompts = $this->getPrompts($params['language']);
+        
+        $systemPrompt = str_replace(
+            ['{language}', '{word_count}'],
+            [$params['language'], $params['word_count']],
+            $prompts['prompt_generation_system']
+        );
 
-        $userContent = "SEO Анализ:\n" . $seoAnalysis['analysis'] . 
-            "\n\nСоздай детальный промпт для написания статьи.";
+        $userContent = $prompts['seo_analysis_prefix'] . ":\n" . $seoAnalysis['analysis'] . 
+            "\n\n" . $prompts['prompt_generation_command'];
 
         $requestData = [
             'model' => $params['model'] ?? config('article-generator.openai.default_model'),
@@ -122,11 +119,13 @@ class OpenAIService
 
     public function generateArticle(string $articlePrompt, array $params): array
     {
+        $prompts = $this->getPrompts($params['language']);
+        
         $requestData = [
             'model' => $params['model'] ?? config('article-generator.openai.default_model'),
             'messages' => [
                 ['role' => 'system', 'content' => $articlePrompt],
-                ['role' => 'user', 'content' => 'Напиши статью согласно всем требованиям в промпте.']
+                ['role' => 'user', 'content' => $prompts['article_write_command']]
             ],
             'temperature' => 0.9,
             'max_tokens' => 8000
@@ -151,28 +150,23 @@ class OpenAIService
 
     public function generateSimpleArticle(array $params): array
     {
+        $prompts = $this->getPrompts($params['language']);
         $keywords = $params['keyword'];
         $requiredKeywords = !empty($params['required_keywords']) 
-            ? 'Обязательные ключевые слова: ' . implode(', ', $params['required_keywords']) 
+            ? $prompts['required_keywords_prefix'] . ': ' . implode(', ', $params['required_keywords']) 
             : '';
 
-        $systemPrompt = "Ты профессиональный копирайтер и SEO-специалист. " .
-            "Напиши статью на тему: {$keywords}.\n\n" .
-            "Требования:\n" .
-            "- Язык: {$params['language']}\n" .
-            "- Страна: {$params['country']}\n" .
-            "- Объем: {$params['word_count']} слов\n" .
-            "- Назначение: {$params['page_type']}\n" .
-            "{$requiredKeywords}\n\n" .
-            "Статья должна быть экспертной, хорошо структурированной с заголовками H1-H3, " .
-            "содержать практическую ценность. В конце добавь 5 вариантов мета-тайтлов " .
-            "и 5 вариантов мета-дескрипшенов.";
+        $systemPrompt = str_replace(
+            ['{language}', '{country}', '{word_count}', '{page_type}', '{required_keywords}'],
+            [$params['language'], $params['country'], $params['word_count'], $params['page_type'], $requiredKeywords],
+            $prompts['simple_article_system']
+        );
 
         $requestData = [
             'model' => $params['model'] ?? config('article-generator.openai.default_model'),
             'messages' => [
                 ['role' => 'system', 'content' => $systemPrompt],
-                ['role' => 'user', 'content' => 'Напиши статью']
+                ['role' => 'user', 'content' => $prompts['simple_article_command'] . ": {$keywords}"]
             ],
             'temperature' => 0.85,
             'max_tokens' => 8000
@@ -250,7 +244,7 @@ class OpenAIService
         return $response;
     }
 
-    private function buildSEOAnalysisPrompt(array $params): string
+    private function buildSEOAnalysisPrompt(array $params, array $prompts): string
     {
         $query = $params['query'];
         $country = $params['country'];
@@ -258,62 +252,39 @@ class OpenAIService
         $pageType = $params['page_type'];
         $requiredKeywords = !empty($params['required_keywords']) 
             ? implode(', ', $params['required_keywords']) 
-            : 'не указаны';
+            : $prompts['not_specified'];
 
-        return <<<PROMPT
-Ты ведущий SEO-стратег и исследователь поисковых систем с глубоким пониманием семантики веб-поиска, 
-современных архитектур поискового ИИ (включая Трансформеры, BERT, MUM, RankBrain), принципов работы 
-с Сущностями (Entities), Онтологиями, Таксономиями, графами знаний.
-
-Параметры анализа:
-- Целевой запрос: {$query}
-- Страна: {$country}
-- Язык: {$language}
-- Тип страницы: {$pageType}
-- Обязательные ключевые слова: {$requiredKeywords}
-
-Выполни комплексный SEO-анализ:
-
-1. АНАЛИЗ SERP (Google для {$country}):
-   - Типы контента в топ-10
-   - Вопросы из "People Also Ask"
-   - Анализ AI Overviews
-   - SERP features
-
-2. МОДЕЛИРОВАНИЕ ИНТЕРПРЕТАЦИИ ЗАПРОСА:
-   - Распознавание сущностей (NER)
-   - Таксономическая ветка
-   - Определение интента
-   - Семантические ожидания от контента
-
-3. РЕКОМЕНДАЦИИ ПО ОПТИМИЗАЦИИ:
-   - Структура статьи (детальная иерархия H1-H3)
-   - Ключевые слова и LSI
-   - Семантическое ядро
-   - Обязательные разделы для раскрытия
-
-4. МЕТАДАННЫЕ:
-   - 5 вариантов мета-тайтлов (50-58 символов)
-   - 5 вариантов мета-дескрипшенов (140-155 символов)
-
-PROMPT;
+        return str_replace(
+            ['{query}', '{country}', '{language}', '{page_type}', '{required_keywords}'],
+            [$query, $country, $language, $pageType, $requiredKeywords],
+            $prompts['seo_analysis_system']
+        );
     }
 
     private function parseArticleResponse(string $content, int $tokensUsed): array
     {
-        preg_match('/#\s+(.+)$/m', $content, $titleMatches);
-        $title = $titleMatches[1] ?? 'Untitled Article';
-
+        // Extract JSON metadata if present
         $metaTitles = [];
-        if (preg_match_all('/Мета-тайтл.*?:\s*(.+)$/m', $content, $matches)) {
-            $metaTitles = array_slice($matches[1], 0, 5);
-        }
-
         $metaDescriptions = [];
-        if (preg_match_all('/Мета-дескрипшен.*?:\s*(.+)$/m', $content, $matches)) {
-            $metaDescriptions = array_slice($matches[1], 0, 5);
+
+        if (preg_match('/<json>(.*?)<\/json>/s', $content, $jsonMatch)) {
+            $json = json_decode($jsonMatch[1], true);
+            if ($json) {
+                $metaTitles = $json['meta_titles'] ?? [];
+                $metaDescriptions = $json['meta_descriptions'] ?? [];
+            }
+            $content = str_replace($jsonMatch[0], '', $content);
         }
 
+        // Extract H1 title
+        if (preg_match('/<h1[^>]*>(.*?)<\/h1>/s', $content, $h1Match)) {
+            $title = strip_tags($h1Match[1]);
+        } else {
+            preg_match('/#\s+(.+)$/m', $content, $titleMatches);
+            $title = $titleMatches[1] ?? 'Untitled Article';
+        }
+
+        // Fallback if no meta tags
         if (empty($metaTitles)) {
             $metaTitles = [$title];
         }
@@ -324,11 +295,44 @@ PROMPT;
 
         return [
             'title' => $title,
-            'content' => $content,
-            'meta_titles' => $metaTitles,
-            'meta_descriptions' => $metaDescriptions,
+            'content' => trim($content),
+            'meta_titles' => array_slice($metaTitles, 0, 5),
+            'meta_descriptions' => array_slice($metaDescriptions, 0, 5),
             'tokens_used' => $tokensUsed,
             'word_count' => str_word_count(strip_tags($content))
+        ];
+    }
+
+    private function getPrompts(string $language): array
+    {
+        $isRussian = (stripos($language, 'ru') !== false || stripos($language, 'рус') !== false);
+
+        if ($isRussian) {
+            return [
+                'seo_analysis_system' => "Ты ведущий SEO-стратег с глубоким пониманием семантики веб-поиска.\n\nПараметры:\n- Запрос: {query}\n- Страна: {country}\n- Язык: {language}\n- Тип: {page_type}\n- Обязательные слова: {required_keywords}\n\nВыполни SEO-анализ: интент, SERP, структура, ключевые слова.",
+                'seo_user_prefix' => 'Проанализируй запрос',
+                'seo_analysis_prefix' => 'SEO Анализ',
+                'prompt_generation_system' => 'Ты эксперт по созданию промптов для SEO-статей на {language}. Объем: {word_count} слов. Создай детальный промпт с ролью, структурой H1-H3, тоном, ключевыми словами.',
+                'prompt_generation_command' => 'Создай детальный промпт для написания статьи',
+                'article_write_command' => 'Напиши статью согласно всем требованиям в промпте',
+                'simple_article_system' => 'Ты профессиональный SEO-копирайтер.\n\nТребования:\n- Язык: {language}\n- Страна: {country}\n- Объем: {word_count} слов\n- Тип: {page_type}\n{required_keywords}\n\nФормат: HTML (h1-h3, p, ul, li). В конце добавь блок <json>{"meta_titles": ["...", "...", "...", "...", "..."], "meta_descriptions": ["...", "...", "...", "...", "..."]}</json> с 5 вариантами.',
+                'simple_article_command' => 'Напиши экспертную статью на тему',
+                'required_keywords_prefix' => 'Обязательные ключевые слова',
+                'not_specified' => 'не указаны'
+            ];
+        }
+
+        return [
+            'seo_analysis_system' => "You are a leading SEO strategist with deep understanding of web search semantics.\n\nParameters:\n- Query: {query}\n- Country: {country}\n- Language: {language}\n- Page Type: {page_type}\n- Required Keywords: {required_keywords}\n\nPerform comprehensive SEO analysis: intent, SERP, structure, keywords.",
+            'seo_user_prefix' => 'Analyze the query',
+            'seo_analysis_prefix' => 'SEO Analysis',
+            'prompt_generation_system' => 'You are an expert in creating prompts for SEO articles in {language}. Target: {word_count} words. Create detailed prompt with role, H1-H3 structure, tone, keywords.',
+            'prompt_generation_command' => 'Create a detailed prompt for writing the article',
+            'article_write_command' => 'Write the article according to all requirements in the prompt',
+            'simple_article_system' => 'You are a professional SEO copywriter.\n\nRequirements:\n- Language: {language}\n- Country: {country}\n- Word Count: {word_count}\n- Type: {page_type}\n{required_keywords}\n\nFormat: HTML (h1-h3, p, ul, li). At the end add <json>{"meta_titles": ["...", "...", "...", "...", "..."], "meta_descriptions": ["...", "...", "...", "...", "..."]}</json> block with 5 variants.',
+            'simple_article_command' => 'Write an expert article about',
+            'required_keywords_prefix' => 'Required keywords',
+            'not_specified' => 'not specified'
         ];
     }
 }
